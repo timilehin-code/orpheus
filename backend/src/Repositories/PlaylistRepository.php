@@ -10,6 +10,13 @@ class PlaylistRepository
 {
     public function __construct(private PDO $db) {}
 
+    public function findById(int $id): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM playlists WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
     public function findByUrlHash(string $hash): ?array
     {
         $stmt = $this->db->prepare('SELECT slug, status FROM playlists WHERE source_url_hash = :hash LIMIT 1');
@@ -40,6 +47,38 @@ class PlaylistRepository
         ]);
 
         return (int) $this->db->lastInsertId();
+    }
+
+    public function attachTrack(int $playlistId, int $trackId, int $position): void
+    {
+        $stmt = $this->db->prepare(
+            'INSERT INTO playlist_tracks (playlist_id, track_id, position)
+             VALUES (:playlist_id, :track_id, :position)
+             ON DUPLICATE KEY UPDATE track_id = VALUES(track_id)'
+        );
+        $stmt->execute([
+            'playlist_id' => $playlistId,
+            'track_id'    => $trackId,
+            'position'    => $position,
+        ]);
+    }
+
+    public function markCompleted(int $id, string $title, ?string $coverUrl): void
+    {
+        $stmt = $this->db->prepare(
+            'UPDATE playlists SET title = :title, cover_url = :cover_url, status = "completed" WHERE id = :id'
+        );
+        $stmt->execute([
+            'id'        => $id,
+            'title'     => $title,
+            'cover_url' => $coverUrl,
+        ]);
+    }
+
+    public function markFailed(int $id): void
+    {
+        $stmt = $this->db->prepare('UPDATE playlists SET status = "failed" WHERE id = :id');
+        $stmt->execute(['id' => $id]);
     }
 
     public function getTracksForPlaylist(int $playlistId): array
