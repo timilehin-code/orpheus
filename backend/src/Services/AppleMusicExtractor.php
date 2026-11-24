@@ -64,20 +64,20 @@ class AppleMusicExtractor implements PlaylistExtractorInterface
             ?? $node['itemKind']
             ?? null;
 
-        $trackId = (string) (
-            $node['contentDescriptor']['identifiers']['storeAdamID']
+        $rawId = $node['contentDescriptor']['identifiers']['storeAdamID']
             ?? $node['playParams']['catalogId']
             ?? $node['playParams']['id']
             ?? $node['id']
-            ?? ''
-        );
+            ?? '';
+
+        $trackId = is_scalar($rawId) ? (string) $rawId : '';
 
         $title = $node['title'] ?? $node['name'] ?? null;
 
         $artist = $node['artistName'] ?? null;
         if (!is_string($artist) && !empty($node['subtitleLinks']) && is_array($node['subtitleLinks'])) {
             $names = array_filter(array_map(
-                fn($link) => is_array($link) ? ($link['title'] ?? null) : null,
+                fn($link) => is_array($link) && is_string($link['title'] ?? null) ? $link['title'] : null,
                 $node['subtitleLinks']
             ));
             if (!empty($names)) {
