@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+set_time_limit(300);
+
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../config/database.php';
 
@@ -27,6 +29,13 @@ if ($playlist === null) {
     exit("Playlist #{$playlistId} not found.\n");
 }
 
+$finished = false;
+register_shutdown_function(function () use (&$finished, $playlists, $playlistId): void {
+    if (!$finished) {
+        $playlists->markFailed($playlistId, 'Worker terminated unexpectedly while processing tracks.');
+    }
+});
+
 try {
     $extractor = match ($playlist['source_platform']) {
         'spotify'       => new SpotifyExtractor(),
@@ -36,8 +45,9 @@ try {
     };
 
     $extracted = $extractor->extract($playlist['source_url']);
+    $items = array_slice($extracted['tracks'], 0, 100);
 
-    foreach ($extracted['tracks'] as $index => $item) {
+    foreach ($items as $index => $item) {
         $key = $tracksRepo->buildNormalizedKey($item['artist'], $item['title']);
         $cached = $tracksRepo->findByNormalizedKey($key);
 
@@ -61,9 +71,11 @@ try {
     }
 
     $playlists->markCompleted($playlistId, $extracted['title'], $extracted['cover_url']);
+    $finished = true;
     echo "Completed playlist #{$playlistId}\n";
 } catch (Throwable $e) {
-    $playlists->markFailed($playlistId);
+    $finished = true;
+    $playlists->markFailed($playlistId, $e->getMessage());
     fwrite(STDERR, "Failed playlist #{$playlistId}: {$e->getMessage()}\n");
     exit(1);
 }

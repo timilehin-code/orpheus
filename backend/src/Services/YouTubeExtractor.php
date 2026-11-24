@@ -9,9 +9,11 @@ use RuntimeException;
 
 class YouTubeExtractor implements PlaylistExtractorInterface
 {
+    private const MAX_TRACKS = 100;
+
     public function extract(string $playlistUrl): array
     {
-        if (!preg_match('#(?:music\.)?youtube\.com/playlist\?.*list=([a-zA-Z0-9_-]+)#', $playlistUrl, $matches)) {
+        if (!preg_match('#(?:music\.)?youtube\.com/(?:playlist|watch)\?.*list=([a-zA-Z0-9_-]+)#i', $playlistUrl, $matches)) {
             throw new RuntimeException('Invalid YouTube or YouTube Music playlist URL.');
         }
 
@@ -33,15 +35,32 @@ class YouTubeExtractor implements PlaylistExtractorInterface
             throw new RuntimeException('YouTube playlist not found or private.');
         }
 
-        $itemsRes = $this->httpGetJson(
-            "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={$listId}&key={$apiKey}"
-        );
+        $rawItems = [];
+        $pageToken = '';
 
-        $rawItems = $itemsRes['items'] ?? [];
-        $videoIds = array_filter(array_map(
+        while (count($rawItems) < self::MAX_TRACKS) {
+            $pageParam = $pageToken !== '' ? '&pageToken=' . urlencode($pageToken) : '';
+            $itemsRes = $this->httpGetJson(
+                "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={$listId}{$pageParam}&key={$apiKey}"
+            );
+
+            foreach ($itemsRes['items'] ?? [] as $item) {
+                $rawItems[] = $item;
+                if (count($rawItems) >= self::MAX_TRACKS) {
+                    break;
+                }
+            }
+
+            $pageToken = (string) ($itemsRes['nextPageToken'] ?? '');
+            if ($pageToken === '') {
+                break;
+            }
+        }
+
+        $videoIds = array_values(array_filter(array_map(
             fn($item) => $item['contentDetails']['videoId'] ?? null,
             $rawItems
-        ));
+        )));
 
         $durations = $this->fetchVideoDurations($videoIds, $apiKey);
         $tracks = [];
@@ -49,14 +68,14 @@ class YouTubeExtractor implements PlaylistExtractorInterface
         foreach ($rawItems as $item) {
             $videoId = $item['contentDetails']['videoId'] ?? '';
             $itemSnippet = $item['snippet'] ?? [];
-            $title = trim((string) ($itemSnippet['title'] ?? ''));
+            $rawTitle = trim((string) ($itemSnippet['title'] ?? ''));
 
-            if ($videoId === '' || $title === '' || $title === 'Private video' || $title === 'Deleted video') {
+            if ($videoId === '' || $rawTitle === '' || $rawTitle === 'Private video' || $rawTitle === 'Deleted video') {
                 continue;
             }
 
             $channel = (string) ($itemSnippet['videoOwnerChannelTitle'] ?? 'Unknown Artist');
-            $artist = trim((string) preg_replace('/\s*-\s*Topic$/i', '', $channel));
+            [$artist, $title] = $this->parseArtistAndTitle($rawTitle, $channel);
 
             $tracks[] = [
                 'title'       => $title,
@@ -67,6 +86,10 @@ class YouTubeExtractor implements PlaylistExtractorInterface
                     ?? $itemSnippet['thumbnails']['default']['url']
                     ?? "https://i.ytimg.com/vi/{$videoId}/hqdefault.jpg",
             ];
+        }
+
+        if (empty($tracks)) {
+            throw new RuntimeException('YouTube playlist is empty or private.');
         }
 
         return [
@@ -84,18 +107,20 @@ class YouTubeExtractor implements PlaylistExtractorInterface
             return [];
         }
 
-        $ids = implode(',', array_slice($videoIds, 0, 50));
-        $res = $this->httpGetJson(
-            "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id={$ids}&key={$apiKey}"
-        );
-
         $map = [];
-        foreach ($res['items'] ?? [] as $video) {
-            $iso = $video['contentDetails']['duration'] ?? '';
-            if ($iso !== '') {
-                $interval = new DateInterval($iso);
-                $seconds = ($interval->h * 3600) + ($interval->i * 60) + $interval->s;
-                $map[$video['id']] = $seconds * 1000;
+        foreach (array_chunk($videoIds, 50) as $chunk) {
+            $ids = implode(',', $chunk);
+            $res = $this->httpGetJson(
+                "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id={$ids}&key={$apiKey}"
+            );
+
+            foreach ($res['items'] ?? [] as $video) {
+                $iso = $video['contentDetails']['duration'] ?? '';
+                if ($iso !== '') {
+                    $interval = new DateInterval($iso);
+                    $seconds = ($interval->h * 3600) + ($interval->i * 60) + $interval->s;
+                    $map[$video['id']] = $seconds * 1000;
+                }
             }
         }
 
@@ -122,16 +147,16 @@ class YouTubeExtractor implements PlaylistExtractorInterface
         }
 
         $tracks = [];
-        foreach ($contents as $entry) {
+        foreach (array_slice($contents, 0, self::MAX_TRACKS) as $entry) {
             $video = $entry['playlistVideoRenderer'] ?? null;
             if (!$video || empty($video['videoId'])) {
                 continue;
             }
 
             $videoId = $video['videoId'];
-            $title = trim((string) ($video['title']['runs'][0]['text'] ?? 'Unknown Title'));
+            $rawTitle = trim((string) ($video['title']['runs'][0]['text'] ?? 'Unknown Title'));
             $channel = (string) ($video['shortBylineText']['runs'][0]['text'] ?? 'Unknown Artist');
-            $artist = trim((string) preg_replace('/\s*-\s*Topic$/i', '', $channel));
+            [$artist, $title] = $this->parseArtistAndTitle($rawTitle, $channel);
             $seconds = isset($video['lengthSeconds']) ? (int) $video['lengthSeconds'] : 0;
 
             $tracks[] = [
@@ -148,6 +173,19 @@ class YouTubeExtractor implements PlaylistExtractorInterface
             'cover_url' => $tracks[0]['cover_url'] ?? null,
             'tracks'    => $tracks,
         ];
+    }
+
+    private function parseArtistAndTitle(string $rawTitle, string $rawChannel): array
+    {
+        $isTopicChannel = (bool) preg_match('/\s*-\s*Topic$/i', $rawChannel);
+        $cleanChannel = trim((string) preg_replace('/\s*-\s*Topic$/i', '', $rawChannel));
+
+        // If uploaded by a third-party channel and formatted as "Artist - Song Title"
+        if (!$isTopicChannel && preg_match('/^(.+?)\s+[-–—]\s+(.+)$/u', $rawTitle, $m)) {
+            return [trim($m[1]), trim($m[2])];
+        }
+
+        return [$cleanChannel ?: 'Unknown Artist', $rawTitle];
     }
 
     private function httpGetJson(string $url): array
