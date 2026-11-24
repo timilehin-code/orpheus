@@ -81,14 +81,29 @@ class PlaylistController
             return;
         }
 
-        $phpBin = PHP_BINARY ?: 'php';
+        $phpBin = $this->resolvePhpCli();
+        $logFile = dirname($worker) . DIRECTORY_SEPARATOR . 'worker.log';
         $cmd = escapeshellarg($phpBin) . ' ' . escapeshellarg($worker) . ' ' . $playlistId;
 
         if (PHP_OS_FAMILY === 'Windows') {
-            pclose(popen('start /B "" ' . $cmd . ' > NUL 2>&1', 'r'));
+            pclose(popen('start /B "" ' . $cmd . ' >> ' . escapeshellarg($logFile) . ' 2>&1', 'r'));
         } else {
-            exec($cmd . ' > /dev/null 2>&1 &');
+            exec($cmd . ' >> ' . escapeshellarg($logFile) . ' 2>&1 &');
         }
+    }
+
+    private function resolvePhpCli(): string
+    {
+        if (!empty($_ENV['PHP_CLI_PATH'])) {
+            return (string) $_ENV['PHP_CLI_PATH'];
+        }
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            $candidate = PHP_BINDIR . DIRECTORY_SEPARATOR . 'php.exe';
+            return file_exists($candidate) ? $candidate : 'php';
+        }
+
+        return PHP_BINARY ?: 'php';
     }
 
     private function json(array $data, int $status = 200): void
