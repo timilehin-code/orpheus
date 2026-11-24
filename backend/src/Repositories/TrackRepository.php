@@ -12,7 +12,7 @@ class TrackRepository
 
     public function buildNormalizedKey(string $artist, string $title): string
     {
-        return hash('sha256', strtolower(trim($artist)) . '|' . strtolower(trim($title)));
+        return \App\Services\TrackMatcher::buildCacheKey($artist, $title);
     }
 
     public function findByNormalizedKey(string $key): ?array

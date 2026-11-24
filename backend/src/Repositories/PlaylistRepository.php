@@ -19,7 +19,9 @@ class PlaylistRepository
 
     public function findByUrlHash(string $hash): ?array
     {
-        $stmt = $this->db->prepare('SELECT slug, status FROM playlists WHERE source_url_hash = :hash LIMIT 1');
+        $stmt = $this->db->prepare(
+            'SELECT id, slug, status, updated_at FROM playlists WHERE source_url_hash = :hash LIMIT 1'
+        );
         $stmt->execute(['hash' => $hash]);
         return $stmt->fetch() ?: null;
     }
@@ -27,7 +29,8 @@ class PlaylistRepository
     public function findBySlug(string $slug): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT id, slug, title, cover_url, source_platform, source_url, status FROM playlists WHERE slug = :slug LIMIT 1'
+            'SELECT id, slug, title, cover_url, source_platform, source_url, status, error_message
+             FROM playlists WHERE slug = :slug LIMIT 1'
         );
         $stmt->execute(['slug' => $slug]);
         return $stmt->fetch() ?: null;
@@ -49,6 +52,14 @@ class PlaylistRepository
         return (int) $this->db->lastInsertId();
     }
 
+    public function resetForRetry(int $id): void
+    {
+        $stmt = $this->db->prepare(
+            'UPDATE playlists SET status = "processing", error_message = NULL WHERE id = :id'
+        );
+        $stmt->execute(['id' => $id]);
+    }
+
     public function attachTrack(int $playlistId, int $trackId, int $position): void
     {
         $stmt = $this->db->prepare(
@@ -66,7 +77,9 @@ class PlaylistRepository
     public function markCompleted(int $id, string $title, ?string $coverUrl): void
     {
         $stmt = $this->db->prepare(
-            'UPDATE playlists SET title = :title, cover_url = :cover_url, status = "completed" WHERE id = :id'
+            'UPDATE playlists
+             SET title = :title, cover_url = :cover_url, status = "completed", error_message = NULL
+             WHERE id = :id'
         );
         $stmt->execute([
             'id'        => $id,
@@ -75,10 +88,15 @@ class PlaylistRepository
         ]);
     }
 
-    public function markFailed(int $id): void
+    public function markFailed(int $id, string $reason = 'Could not process this playlist.'): void
     {
-        $stmt = $this->db->prepare('UPDATE playlists SET status = "failed" WHERE id = :id');
-        $stmt->execute(['id' => $id]);
+        $stmt = $this->db->prepare(
+            'UPDATE playlists SET status = "failed", error_message = :reason WHERE id = :id'
+        );
+        $stmt->execute([
+            'id'     => $id,
+            'reason' => mb_substr($reason, 0, 250),
+        ]);
     }
 
     public function getTracksForPlaylist(int $playlistId): array
