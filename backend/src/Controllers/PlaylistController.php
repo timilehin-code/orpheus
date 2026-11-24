@@ -17,16 +17,29 @@ class PlaylistController
 
         $parsed = $this->parsePlaylistUrl($rawUrl);
         if ($parsed === null) {
-            $this->json(['error' => 'Paste a valid Spotify, Apple Music, or YouTube Music playlist link.'], 422);
+            $this->json([
+                'error' => 'Paste a valid public Spotify, Apple Music, or YouTube Music playlist link (personal auto-mixes are not supported).',
+            ], 422);
             return;
         }
 
         [$platform, $cleanUrl] = $parsed;
         $hash = hash('sha256', $cleanUrl);
 
-        // Return immediately if this playlist was already converted
         $existing = $this->playlists->findByUrlHash($hash);
         if ($existing !== null) {
+            $isStale = $existing['status'] === 'processing'
+                && !empty($existing['updated_at'])
+                && (time() - strtotime((string) $existing['updated_at'])) > 240;
+
+            if ($existing['status'] === 'failed' || $isStale) {
+                $playlistId = (int) $existing['id'];
+                $this->playlists->resetForRetry($playlistId);
+                $this->dispatchBackgroundWorker($playlistId);
+                $this->json(['slug' => $existing['slug'], 'status' => 'processing']);
+                return;
+            }
+
             $this->json(['slug' => $existing['slug'], 'status' => $existing['status']]);
             return;
         }
@@ -59,16 +72,23 @@ class PlaylistController
 
     private function parsePlaylistUrl(string $url): ?array
     {
-        if (preg_match('#open\.spotify\.com/playlist/([a-zA-Z0-9]+)#', $url, $m)) {
+        // Supports regional prefixes like open.spotify.com/intl-en/playlist/...
+        if (preg_match('#open\.spotify\.com/(?:intl-[a-z-]+/)?playlist/([a-zA-Z0-9]+)#i', $url, $m)) {
             return ['spotify', "https://open.spotify.com/playlist/{$m[1]}"];
         }
 
-        if (preg_match('#music\.apple\.com/([a-z]{2})/playlist/[^/]+/(pl\.[a-zA-Z0-9-]+)#', $url, $m)) {
-            return ['apple_music', "https://music.apple.com/{$m[1]}/playlist/{$m[2]}"];
+        // Supports both /playlist/name/pl.xxx and /playlist/pl.xxx
+        if (preg_match('#music\.apple\.com/([a-z]{2})/playlist/(?:[^/]+/)?(pl\.[a-zA-Z0-9-]+)#i', $url, $m)) {
+            return ['apple_music', "https://music.apple.com/" . strtolower($m[1]) . "/playlist/{$m[2]}"];
         }
 
-        if (preg_match('#(?:music\.)?youtube\.com/playlist\?.*list=([a-zA-Z0-9_-]+)#', $url, $m)) {
-            return ['youtube_music', "https://music.youtube.com/playlist?list={$m[1]}"];
+        // Supports /playlist?list=... and /watch?v=...&list=... (rejects personal RD auto-mixes)
+        if (preg_match('#(?:music\.)?youtube\.com/(?:playlist|watch)\?.*list=([a-zA-Z0-9_-]+)#i', $url, $m)) {
+            $listId = $m[1];
+            if (str_starts_with($listId, 'RD')) {
+                return null;
+            }
+            return ['youtube_music', "https://music.youtube.com/playlist?list={$listId}"];
         }
 
         return null;
