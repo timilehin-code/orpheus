@@ -8,6 +8,27 @@ class TrackMatcher
 {
     private ?string $spotifyToken = null;
 
+    public static function buildCacheKey(string $artist, string $title): string
+    {
+        $normArtist = strtolower(self::cleanArtist($artist));
+        $normTitle = strtolower(self::cleanText($title));
+        return hash('sha256', "{$normArtist}|{$normTitle}");
+    }
+
+    public static function cleanText(string $text): string
+    {
+        $text = preg_replace('/[\(\[].*?(feat|ft|official|video|audio|lyrics|visualizer|from|remaster).*?[\)\]]/i', '', $text);
+        return trim((string) preg_replace('/\s+/', ' ', (string) $text));
+    }
+
+    public static function cleanArtist(string $artist): string
+    {
+        $artist = preg_replace('/\s*-\s*Topic$/i', '', $artist);
+        // Split only on commas or featured credits so bands like "King Gizzard & The Lizard Wizard" stay intact
+        $parts = preg_split('/,|(?:\s+(?:feat\.|ft\.|with)\s+)/i', (string) $artist);
+        return trim((string) ($parts[0] ?? $artist));
+    }
+
     public function matchTrack(array $track, string $sourcePlatform): array
     {
         $ids = [
@@ -17,11 +38,12 @@ class TrackMatcher
             'cover_url'        => $track['cover_url'] ?? null,
         ];
 
-        $cleanTitle = $this->cleanText($track['title']);
-        $cleanArtist = $this->cleanArtist($track['artist']);
+        $cleanTitle = self::cleanText($track['title']);
+        $cleanArtist = self::cleanArtist($track['artist']);
         $durationMs = $track['duration_ms'] ?? null;
 
         if ($ids['apple_music_id'] === null) {
+            usleep(200000); // Pace requests to avoid iTunes Search API 429 rate limits
             $appleMatch = $this->searchAppleMusic($cleanTitle, $cleanArtist, $durationMs);
             if ($appleMatch !== null) {
                 $ids['apple_music_id'] = $appleMatch['id'];
@@ -54,8 +76,8 @@ class TrackMatcher
         $bestScore = 0.0;
 
         foreach ($data['results'] ?? [] as $item) {
-            $candTitle = $this->cleanText((string) ($item['trackName'] ?? ''));
-            $candArtist = $this->cleanArtist((string) ($item['artistName'] ?? ''));
+            $candTitle = self::cleanText((string) ($item['trackName'] ?? ''));
+            $candArtist = self::cleanArtist((string) ($item['artistName'] ?? ''));
             $candDuration = isset($item['trackTimeMillis']) ? (int) $item['trackTimeMillis'] : null;
 
             $score = $this->scoreCandidate($title, $artist, $durationMs, $candTitle, $candArtist, $candDuration);
@@ -89,8 +111,8 @@ class TrackMatcher
         $bestScore = 0.0;
 
         foreach (array_slice($videos, 0, 6) as $video) {
-            $candTitle = $this->cleanText($video['title']);
-            $candArtist = $this->cleanArtist($video['channel']);
+            $candTitle = self::cleanText($video['title']);
+            $candArtist = self::cleanArtist($video['channel']);
             $score = $this->scoreCandidate($title, $artist, $durationMs, $candTitle, $candArtist, $video['duration_ms']);
 
             if ($score > $bestScore && $score >= 60.0) {
@@ -120,8 +142,8 @@ class TrackMatcher
         $bestScore = 0.0;
 
         foreach ($data['tracks']['items'] ?? [] as $item) {
-            $candTitle = $this->cleanText((string) ($item['name'] ?? ''));
-            $candArtist = $this->cleanArtist((string) ($item['artists'][0]['name'] ?? ''));
+            $candTitle = self::cleanText((string) ($item['name'] ?? ''));
+            $candArtist = self::cleanArtist((string) ($item['artists'][0]['name'] ?? ''));
             $candDuration = isset($item['duration_ms']) ? (int) $item['duration_ms'] : null;
 
             $score = $this->scoreCandidate($title, $artist, $durationMs, $candTitle, $candArtist, $candDuration);
@@ -230,20 +252,7 @@ class TrackMatcher
         return null;
     }
 
-    private function cleanText(string $text): string
-    {
-        $text = preg_replace('/[\(\[].*?(feat|ft|official|video|audio|lyrics|visualizer|from).*?[\)\]]/i', '', $text);
-        return trim((string) preg_replace('/\s+/', ' ', (string) $text));
-    }
-
-    private function cleanArtist(string $artist): string
-    {
-        $artist = preg_replace('/\s*-\s*Topic$/i', '', $artist);
-        $parts = preg_split('/[,&]|feat\.|ft\./i', (string) $artist);
-        return trim((string) ($parts[0] ?? $artist));
-    }
-
-    private function httpGet(string $url, array $headers = []): string
+    private function httpGet(string $url, array $headers = [], int $attempt = 1): string
     {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -254,7 +263,14 @@ class TrackMatcher
             CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         ]);
         $res = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        return $res === false ? '' : (string) $res;
+
+        if ($status === 429 && $attempt === 1) {
+            sleep(2);
+            return $this->httpGet($url, $headers, 2);
+        }
+
+        return ($res === false || $status >= 400) ? '' : (string) $res;
     }
 }
